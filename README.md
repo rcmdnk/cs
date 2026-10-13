@@ -11,8 +11,9 @@ It works on Bash and Zsh, on Linux (GNU tools) and macOS (BSD tools).
 ```
 $ cs
 03-14 10:22  .../work/project/app  fix the login redirect bug
-03-14 09:05  /home/user/notes      summarize this meeting
+03-14 09:05  /home/user/notes      [notes] summarize this meeting
 03-13 18:40  /home/user/src/lib    add tests for the parser
+03-12 17:15  !/home/user/src/tmp   try the new tokenizer
 ```
 
 ## Requirements
@@ -93,8 +94,14 @@ $ cs
 
 `cs -h` shows the help and `cs -v` shows the version.
 
-Sessions are read from `~/.claude/projects/*/*.jsonl` and listed newest first
+Sessions are read from `~/.claude/projects/*/*.jsonl`
+(`$CLAUDE_CONFIG_DIR/projects/*/*.jsonl` when `CLAUDE_CONFIG_DIR` is set) and listed newest first
 by the modification time of the session file.
+The message is the first prompt of the session;
+records of slash commands, system reminders and other injected context are skipped.
+A session named with `/rename` shows the name as `[name]` before the message.
+A directory that no longer exists is marked with `!`;
+such a session is resumed in the current directory.
 Select a line, then `cs` moves to the directory of the session
 and runs `claude --resume` with its session id.
 
@@ -136,10 +143,11 @@ SELECTION_TOOL=${SELECTION_TOOL:-sentaku,peco,fzy,fzf}
 # Number of sessions to list
 CS_MAX_SESSIONS=${CS_MAX_SESSIONS:-20}
 
-# Directory names longer than this are shown as "...<last 17 characters>"
+# Directory names longer than this are shown as "...<last CS_CWD_MAX_LENGTH-3 characters>"
+# (the ! mark of a missing directory is included in the length)
 CS_CWD_MAX_LENGTH=${CS_CWD_MAX_LENGTH:-20}
 
-# The first message is cut to this length
+# The first message and the session name are cut to this length
 CS_MESSAGE_MAX_LENGTH=${CS_MESSAGE_MAX_LENGTH:-30}
 
 # Only sessions whose records have this entrypoint are listed

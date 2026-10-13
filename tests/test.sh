@@ -24,7 +24,7 @@ trap 'rm -rf "$testdir"' EXIT
 export CS_TEST_DIR=$testdir
 export HOME=$testdir
 export PATH="$testdir/bin:$PATH"
-mkdir -p "$testdir/bin" "$HOME/work/a" "$HOME/work/b" "$HOME/work/c" "$HOME/work/d" "$HOME/work/e" "$HOME/work/f" "$HOME/work/g h" "$HOME/work/h"
+mkdir -p "$testdir/bin" "$HOME/work/a" "$HOME/work/b" "$HOME/work/c" "$HOME/work/d" "$HOME/work/e" "$HOME/work/f" "$HOME/work/g h" "$HOME/work/h" "$HOME/work/i" "$HOME/work/j" "$HOME/work/k" "$HOME/work/l" "$HOME/work/x"
 cat > "$testdir/bin/claude" <<'FAKE'
 #!/bin/sh
 pwd -P > "$CS_TEST_DIR/claude_pwd"
@@ -45,7 +45,7 @@ FAKE
 chmod +x "$testdir/bin/claude" "$testdir/bin/sentaku" "$testdir/bin/fzf"
 
 make_session () { # project id cwd entrypoint content mtime
-  local f="$HOME/.claude/projects/$1/$2.jsonl"
+  local f="${CS_TEST_PROJECTS:-$HOME/.claude/projects}/$1/$2.jsonl"
   mkdir -p "$(dirname "$f")"
   printf '{"type":"queue-operation","sessionId":"%s"}\n' "$2" > "$f"
   printf '{"type":"user","cwd":"%s","sessionId":"%s","entrypoint":"%s","message":{"role":"user","content":%s}}\n' \
@@ -73,11 +73,42 @@ mkdir -p "$HOME/.claude/projects/-work-h"
 printf '{"type":"queue-operation","sessionId":"hhhh-0001"}\n{"type":"system","cwd":"%s","sessionId":"hhhh-0001","entrypoint":"cli"}\n' \
   "$HOME/work/h" > "$HOME/.claude/projects/-work-h/hhhh-0001.jsonl"
 touch -t 202512312359 "$HOME/.claude/projects/-work-h/hhhh-0001.jsonl"
+mkdir -p "$HOME/.claude/projects/-work-i" "$HOME/.claude/projects/-work-j" "$HOME/.claude/projects/-work-k"
+make_meta_record () { # file cwd id content
+  printf '{"type":"user","cwd":"%s","sessionId":"%s","entrypoint":"cli","isMeta":true,"message":{"role":"user","content":%s}}\n' \
+    "$2" "$3" "$4" >> "$1"
+}
+make_meta_record "$HOME/.claude/projects/-work-i/iiii-0001.jsonl" "$HOME/work/i" iiii-0001 '"<local-command-caveat>Caveat: the messages below were generated</local-command-caveat>"'
+make_record "$HOME/.claude/projects/-work-i/iiii-0001.jsonl" user "$HOME/work/i" iiii-0001 cli '"<command-name>/clear</command-name>\n<command-message>clear</command-message>"'
+make_record "$HOME/.claude/projects/-work-i/iiii-0001.jsonl" user "$HOME/work/i" iiii-0001 cli '[{"type":"text","text":"prompt after meta i1"}]'
+touch -t 202512312357 "$HOME/.claude/projects/-work-i/iiii-0001.jsonl"
+make_meta_record "$HOME/.claude/projects/-work-j/jjjj-0001.jsonl" "$HOME/work/j" jjjj-0001 '"<local-command-caveat>Caveat: the messages below were generated</local-command-caveat>"'
+make_record "$HOME/.claude/projects/-work-j/jjjj-0001.jsonl" user "$HOME/work/j" jjjj-0001 cli '"<command-name>/clear</command-name>\n<command-message>clear</command-message>"'
+touch -t 202512312356 "$HOME/.claude/projects/-work-j/jjjj-0001.jsonl"
+make_record "$HOME/.claude/projects/-work-k/kkkk-0001.jsonl" user "$HOME/work/k" kkkk-0001 cli '"first message k1"'
+printf '{"type":"custom-title","customTitle":"old name","sessionId":"kkkk-0001"}\n{"type":"custom-title","customTitle":"k title","sessionId":"kkkk-0001"}\n' \
+  >> "$HOME/.claude/projects/-work-k/kkkk-0001.jsonl"
+touch -t 202512312355 "$HOME/.claude/projects/-work-k/kkkk-0001.jsonl"
+make_session -work-m mmmm-0001 "$HOME/work/m" cli '"first message m1"' 202512312354
+mkdir -p "$HOME/.claude/projects/-work-l"
+make_meta_record "$HOME/.claude/projects/-work-l/llll-0001.jsonl" "$HOME/work/l" llll-0001 '"<local-command-caveat>Caveat: the messages below were generated</local-command-caveat>"'
+make_record "$HOME/.claude/projects/-work-l/llll-0001.jsonl" user "$HOME/work/l" llll-0001 cli '"<command-name>/init</command-name>"'
+make_record "$HOME/.claude/projects/-work-l/llll-0001.jsonl" user "$HOME/work/l" llll-0001 cli '[{"tool_use_id":"toolu_01","type":"tool_result","content":[{"type":"text","text":"agent report l1"}]}]'
+make_record "$HOME/.claude/projects/-work-l/llll-0001.jsonl" user "$HOME/work/l" llll-0001 cli '"prompt after tool result l1"'
+touch -t 202512312353 "$HOME/.claude/projects/-work-l/llll-0001.jsonl"
 # }}}
 
 line_matches () { # line_number pattern
   if ! sed -n "${1}p" "$testdir/list" | grep -q -- "$2";then
     echo "    line $1 is: $(sed -n "${1}p" "$testdir/list")"
+    return 1
+  fi
+}
+dir_width () { # line_number width: the directory column of the line has this width
+  local dir
+  dir=$(sed -n "${1}p" "$testdir/list" | awk '{print $3}')
+  if [ "${#dir}" -ne "$2" ];then
+    echo "    directory column is ${#dir} wide: $dir"
     return 1
   fi
 }
@@ -114,7 +145,7 @@ reset_result
 export PICK=2
 cs
 check "sentaku is called with -s line" [ "$(cat "$testdir/sentaku_args")" = "-s line" ]
-check "7 sessions are listed (sdk-py session is excluded)" [ "$(wc -l < "$testdir/list" | tr -d ' ')" -eq 7 ]
+check "12 sessions are listed (sdk-py session is excluded)" [ "$(wc -l < "$testdir/list" | tr -d ' ')" -eq 12 ]
 check "sdk-py session is not listed" not_in_list "sdk run"
 check "line 1 is the newest session with its mtime" line_matches 1 '^01-01 02:00 .*work/b .*first message b1 second line'
 check "line 2 keeps literal backslashes in one row" line_matches 2 '^01-01 01:30 .*work/d .*literal \\n and \\t in d1 *$'
@@ -123,6 +154,13 @@ check "line 4 is the oldest session (array content)" line_matches 4 '^01-01 00:3
 check "line 5 is the session resumed from the terminal, with its first message" line_matches 5 '^01-01 00:01 .*work/f .*started by sdk f1'
 check "line 6 is a session without a user record (empty message)" line_matches 6 '^12-31 23:59 .*work/h *$'
 check "line 7 is a session in a directory with a space" line_matches 7 '^12-31 23:58 .*work/g h *space dir g1'
+check "line 8 shows the first prompt after meta and slash command records" line_matches 8 '^12-31 23:57 .*work/i *prompt after meta i1'
+check "line 9 shows the slash command when there is no other prompt" line_matches 9 '^12-31 23:56 .*work/j *<command-name>/clear'
+check "line 10 shows the last session name before the message" line_matches 10 '^12-31 23:55 .*work/k *\[k title\] first message k1'
+check "line 11 marks a directory which does not exist" line_matches 11 '^12-31 23:54  !\.\.\..*work/m *first message m1'
+check "line 12 skips tool results when looking for the prompt" line_matches 12 '^12-31 23:53 .*work/l *prompt after tool result l1'
+check "a cut directory is CS_CWD_MAX_LENGTH wide" dir_width 1 20
+check "a cut directory with the ! mark is CS_CWD_MAX_LENGTH wide" dir_width 11 20
 check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume dddd-0001" ]
 check "claude runs in the session directory" [ "$(cat "$testdir/claude_pwd")" = "$(abs "$HOME/work/d")" ]
 check "the current shell moves to the session directory" [ "$(pwd -P)" = "$(abs "$HOME/work/d")" ]
@@ -142,6 +180,27 @@ export PICK=7
 cs
 check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume gggg-0001" ]
 check "claude runs in the session directory" [ "$(cat "$testdir/claude_pwd")" = "$(abs "$HOME/work/g h")" ]
+cd "$testdir" || exit 1
+
+echo "Select a session whose directory does not exist"
+reset_result
+export PICK=11
+cs 2> "$testdir/err"
+check "prints a message" grep -q "directory not found" "$testdir/err"
+check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume mmmm-0001" ]
+check "claude runs in the current directory" [ "$(cat "$testdir/claude_pwd")" = "$(abs "$testdir")" ]
+cd "$testdir" || exit 1
+
+echo "CLAUDE_CONFIG_DIR (with a quote, a space and \$() in the path)"
+reset_result
+export PICK=1
+cfg="$testdir/o'b \$(x)"
+CS_TEST_PROJECTS="$cfg/projects" make_session -work-x xxxx-0001 "$HOME/work/x" cli '"config dir x1"' 202601010300
+printf '{"type":"custom-title","customTitle":"x name","sessionId":"xxxx-0001"}\n' >> "$cfg/projects/-work-x/xxxx-0001.jsonl"
+CLAUDE_CONFIG_DIR="$cfg" cs
+check "only sessions under CLAUDE_CONFIG_DIR are listed" [ "$(wc -l < "$testdir/list" | tr -d ' ')" -eq 1 ]
+check "the session is listed with its name" line_matches 1 'work/x *\[x name\] config dir x1'
+check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume xxxx-0001" ]
 cd "$testdir" || exit 1
 
 echo "Invalid CS_MAX_SESSIONS"
@@ -164,6 +223,9 @@ check "CS_CWD_MAX_LENGTH cuts the directory" line_matches 1 ' \.\.\..*work/b '
 reset_result
 CS_CWD_MAX_LENGTH=1000 cs
 check "a short enough directory is not cut" line_matches 1 " $HOME/work/b "
+reset_result
+CS_CWD_MAX_LENGTH=10 cs
+check "CS_CWD_MAX_LENGTH keeps its length minus 3" line_matches 1 ' \.\.\./work/b '
 cd "$testdir" || exit 1
 
 echo "Other selection tool (no options)"

@@ -19,9 +19,10 @@ _CS_DATE="13/Oct/2026"
 #   SELECTION_TOOL        comma separated selectors to try (default: sentaku,peco,fzy,fzf)
 #   CS_MAX_SESSIONS       number of sessions to list
 #   CS_CWD_MAX_LENGTH     cut directory names longer than this
-#   CS_MESSAGE_MAX_LENGTH cut the first message longer than this
+#   CS_MESSAGE_MAX_LENGTH cut the first message and the session name longer than this
 #   CS_ENTRYPOINT         list only sessions whose records have this entrypoint
 #                         (cli: started from the terminal; sdk-py etc. are subagent runs)
+#   CLAUDE_CONFIG_DIR     Claude Code configuration directory (default: ~/.claude)
 
 # This file must be sourced, not executed {{{
 if [ -n "${ZSH_VERSION:-}" ];then
@@ -66,8 +67,9 @@ _cs_select () { # Select from list {{{
 
 _cs_sessions () { # Read "mtime path" lines (newest first) from stdin and print the sessions {{{
   # Each file is read until "entrypoint":"$CS_ENTRYPOINT", cwd, sessionId and
-  # the first user message are found; stops after CS_MAX_SESSIONS sessions.
-  # Output: mtime, cwd, first message and sessionId separated by \037.
+  # the first user prompt are found; stops after CS_MAX_SESSIONS sessions.
+  # The session name is the last custom-title record in the last 128KB of the file.
+  # Output: mtime, cwd, first prompt, sessionId and name separated by \037.
   # LC_ALL=C makes awk work on bytes in every awk.
   LC_ALL=C awk -v ep="$CS_ENTRYPOINT" -v nmax="$CS_MAX_SESSIONS" \
     -v msgmax="$CS_MESSAGE_MAX_LENGTH" '
@@ -103,7 +105,7 @@ _cs_sessions () { # Read "mtime path" lines (newest first) from stdin and print 
     return json_str(substr(line, p + length(k)), max)
   }
   # The first text of message.content in a user record line
-  function first_message(line,   p, c) {
+  function first_text(line,   p, c) {
     p = index(line, "\"content\":")
     if (p == 0) return ""
     c = substr(line, p + 10)
@@ -114,14 +116,16 @@ _cs_sessions () { # Read "mtime path" lines (newest first) from stdin and print 
   BEGIN {
     if (nmax <= 0) exit
     epkey = "\"entrypoint\":\"" ep "\""
+    sq = "\047"
+    dq = "\042"
   }
   {
     sp = index($0, " ")
     ts = substr($0, 1, sp - 1)
     f = substr($0, sp + 1)
     ok = 0
-    got_cwd = 0; got_id = 0; got_first = 0
-    cwd = ""; id = ""; first = ""
+    got_cwd = 0; got_id = 0; got_prompt = 0
+    cwd = ""; id = ""; prompt = ""; text = ""; meta = ""
     while ((getline line < f) > 0) {
       if (!got_cwd && index(line, "\"cwd\"")) {
         cwd = json_value(line, "cwd", 0)
@@ -131,18 +135,63 @@ _cs_sessions () { # Read "mtime path" lines (newest first) from stdin and print 
         id = json_value(line, "sessionId", 0)
         got_id = 1
       }
-      if (!got_first && index(line, "\"type\":\"user\"")) {
-        first = first_message(line)
-        got_first = 1
+      # The prompt: the first user text which is not a tool result, a meta record or
+      # a <tag> (slash command records, system reminders etc.)
+      if (!got_prompt && index(line, "\"type\":\"user\"") && !index(line, "\"tool_use_id\"")) {
+        t = first_text(line)
+        if (index(line, "\"isMeta\":true")) {
+          if (meta == "") meta = t
+        } else {
+          if (text == "") text = t
+          sub(/^ +/, "", t)
+          if (t != "" && substr(t, 1, 1) != "<") {
+            prompt = t
+            got_prompt = 1
+          }
+        }
       }
       if (!ok && index(line, epkey)) ok = 1
-      if (ok && got_cwd && got_id && got_first) break
+      if (ok && got_cwd && got_id && got_prompt) break
     }
     close(f)
     if (!ok) next
-    printf "%s\037%s\037%s\037%s\n", ts, cwd, first, id
-    if (++n >= nmax) exit
+    n++
+    tss[n] = ts
+    files[n] = f
+    cwds[n] = cwd
+    ids[n] = id
+    prompts[n] = (prompt != "") ? prompt : (text != "") ? text : meta
+    if (n >= nmax) exit
+  }
+  END {
+    for (i = 1; i <= n; i += 50) {
+      cmd = "tail -c 131072 --"
+      for (j = i; j < i + 50 && j <= n; j++) {
+        f = files[j]
+        gsub(sq, sq dq sq dq sq, f)
+        cmd = cmd " " sq f sq
+      }
+      cmd = cmd " 2>/dev/null"
+      while ((cmd | getline line) > 0) {
+        if (index(line, "\"type\":\"custom-title\"")) {
+          id = json_value(line, "sessionId", 0)
+          if (id != "") names[id] = json_value(line, "customTitle", msgmax)
+        }
+      }
+      close(cmd)
+    }
+    for (i = 1; i <= n; i++) {
+      printf "%s\037%s\037%s\037%s\037%s\n", tss[i], cwds[i], prompts[i], ids[i], names[ids[i]]
+    }
   }'
+} # }}}
+
+_cs_check_number () { # name value {{{
+  case $2 in
+    ''|*[!0-9]*)
+      echo "cs: $1 must be a number: $2" >&2
+      return 1;;
+  esac
 } # }}}
 
 CS_MAX_SESSIONS=${CS_MAX_SESSIONS:-20}
@@ -150,7 +199,7 @@ CS_CWD_MAX_LENGTH=${CS_CWD_MAX_LENGTH:-20}
 CS_MESSAGE_MAX_LENGTH=${CS_MESSAGE_MAX_LENGTH:-30}
 CS_ENTRYPOINT=${CS_ENTRYPOINT:-cli} # list only sessions started from the terminal (sdk-py etc. are subagent runs)
 cs () { # {{{ claude with session selection
-  local sessions ids dirs n list ts d cwd dir first id selected date_cmd
+  local sessions ids dirs n list ts d cwd dir first id name selected date_cmd mark limit keep
   case "${1:-}" in
     -v|--version)
       printf '%s %s %s\n' "$_CS_NAME" "$_CS_VERSION" "$_CS_DATE"
@@ -169,8 +218,9 @@ Variables (set before sourcing cs):
   SELECTION_TOOL         Selection tools to try, comma separated (default: sentaku,peco,fzy,fzf)
   CS_MAX_SESSIONS        Number of sessions to list (default: 20)
   CS_CWD_MAX_LENGTH      Directory names longer than this are shortened (default: 20)
-  CS_MESSAGE_MAX_LENGTH  The first message is cut to this length (default: 30)
+  CS_MESSAGE_MAX_LENGTH  The first message and the session name are cut to this length (default: 30)
   CS_ENTRYPOINT          Only sessions with this entrypoint are listed (default: cli)
+  CLAUDE_CONFIG_DIR      Claude Code configuration directory (default: ~/.claude)
 EOF
       return 0;;
     "") ;;
@@ -178,11 +228,9 @@ EOF
       echo "cs: unknown option: $1" >&2
       return 1;;
   esac
-  case $CS_MAX_SESSIONS in
-    ''|*[!0-9]*)
-      echo "cs: CS_MAX_SESSIONS must be a number: $CS_MAX_SESSIONS" >&2
-      return 1;;
-  esac
+  _cs_check_number CS_MAX_SESSIONS "$CS_MAX_SESSIONS" || return 1
+  _cs_check_number CS_CWD_MAX_LENGTH "$CS_CWD_MAX_LENGTH" || return 1
+  _cs_check_number CS_MESSAGE_MAX_LENGTH "$CS_MESSAGE_MAX_LENGTH" || return 1
   local -a stat_fmt
   # find -printf is GNU only: get mtime with stat (GNU: -c, BSD: -f)
   if [[ $(stat --version 2>/dev/null) == *GNU* ]];then
@@ -209,7 +257,7 @@ EOF
       date_cmd=bsd_date
     fi
   fi
-  sessions=$(find ~/.claude/projects/ -maxdepth 2 -name '*.jsonl' \
+  sessions=$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/" -maxdepth 2 -name '*.jsonl' \
     -exec stat "${stat_fmt[@]}" {} + | sort -rn | _cs_sessions)
   if [ -z "$sessions" ];then
     echo "No claude session found (CS_ENTRYPOINT=${CS_ENTRYPOINT})" >&2
@@ -219,7 +267,7 @@ EOF
   dirs=()
   n=0
   list=""
-  while IFS=$'\037' read -r ts cwd first id; do
+  while IFS=$'\037' read -r ts cwd first id name; do
     ts=${ts%.*}
     case $date_cmd in
       strftime) strftime -s d '%m-%d %H:%M' "$ts";;
@@ -228,18 +276,34 @@ EOF
       *) d=$(date -r "$ts" '+%m-%d %H:%M');;
     esac
     dir=$cwd
-    if [ ${#cwd} -gt "${CS_CWD_MAX_LENGTH}" ]; then
-      cwd="...${cwd: -17}"
+    # A directory which does not exist any more is marked with !
+    mark=""
+    limit=$CS_CWD_MAX_LENGTH
+    if [ ! -d "$dir" ]; then
+      mark="!"
+      limit=$((limit - 1))
     fi
+    if [ ${#cwd} -gt "$limit" ]; then
+      keep=$((limit - 3))
+      if [ "$keep" -lt 1 ];then
+        keep=1
+      fi
+      cwd="...${cwd: -$keep}"
+    fi
+    cwd="$mark$cwd"
     # Cut by characters, not bytes (GNU cut -c counts bytes)
     first=${first:0:${CS_MESSAGE_MAX_LENGTH}}
+    name=${name:0:${CS_MESSAGE_MAX_LENGTH}}
     ids+=("$id")
     dirs+=("$dir")
+    if [ -n "$name" ];then
+      first="[$name] $first"
+    fi
     # Keep backslashes in values literal: no echo -e here (zsh echo interprets them too)
     list="$list$d"$'\t'"$cwd"$'\t'"$first"$'\n'
     n=$((n + 1))
   done <<< "$sessions"
-  list=$(printf '%s' "$list" | column -t -s $'\t')
+  list=$(printf '%s' "$list" | column -t -s $'\t' | sed 's/ *$//')
   selected=$(_cs_select "$list")
   if [ -z "$selected" ]; then
     return
@@ -252,7 +316,11 @@ EOF
   if [ -z "${ZSH_VERSION:-}" ] || setopt | grep -q ksharrays;then
     n=$((n - 1))
   fi
-  cd "${dirs[n]}" || return $?
+  if [ -d "${dirs[n]}" ];then
+    cd "${dirs[n]}" || return $?
+  else
+    echo "cs: directory not found, resuming in the current directory: ${dirs[n]}" >&2
+  fi
   eval "${PROMPT_COMMAND:-}"
   claude --resume "${ids[n]}"
 } # }}}
