@@ -16,7 +16,8 @@ _CS_DATE="13/Oct/2026"
 #   cs
 #
 # Variables (set before sourcing to override):
-#   SELECTION_TOOL        comma separated selectors to try (default: sentaku,peco,fzy,fzf)
+#   CS_SELECTION_TOOL     comma separated selectors to try (default: sentaku,peco,fzy,fzf)
+#                         (SELECTION_TOOL is used when it is not set)
 #   CS_MAX_SESSIONS       number of sessions to list
 #   CS_CWD_MAX_LENGTH     cut directory names longer than this
 #   CS_MESSAGE_MAX_LENGTH cut the first message and the session name longer than this
@@ -43,7 +44,7 @@ _cs_select () { # Select from list {{{
   local -a values
   local line value
   opts=()
-  for t in $(echo "${SELECTION_TOOL:-sentaku,peco,fzy,fzf}"|tr , ' ');do
+  for t in $(echo "$CS_SELECTION_TOOL"|tr , ' ');do
     if type "$t" >& /dev/null ;then
       tool=$t
       break
@@ -194,6 +195,7 @@ _cs_check_number () { # name value {{{
   esac
 } # }}}
 
+CS_SELECTION_TOOL=${CS_SELECTION_TOOL:-${SELECTION_TOOL:-sentaku,peco,fzy,fzf}}
 CS_MAX_SESSIONS=${CS_MAX_SESSIONS:-20}
 CS_CWD_MAX_LENGTH=${CS_CWD_MAX_LENGTH:-20}
 CS_MESSAGE_MAX_LENGTH=${CS_MESSAGE_MAX_LENGTH:-30}
@@ -215,7 +217,7 @@ move to its directory and run claude --resume.
   -v, --version  Show version
 
 Variables (set before sourcing cs):
-  SELECTION_TOOL         Selection tools to try, comma separated (default: sentaku,peco,fzy,fzf)
+  CS_SELECTION_TOOL      Selection tools to try, comma separated (default: sentaku,peco,fzy,fzf)
   CS_MAX_SESSIONS        Number of sessions to list (default: 20)
   CS_CWD_MAX_LENGTH      Directory names longer than this are shortened (default: 20)
   CS_MESSAGE_MAX_LENGTH  The first message and the session name are cut to this length (default: 30)

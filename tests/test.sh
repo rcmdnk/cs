@@ -231,8 +231,17 @@ cd "$testdir" || exit 1
 echo "Other selection tool (no options)"
 reset_result
 export PICK=1
-SELECTION_TOOL=fzf cs
+CS_SELECTION_TOOL=fzf cs
 check "fzf is called without options" [ -e "$testdir/fzf_args" ] && [ -z "$(cat "$testdir/fzf_args")" ]
+check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume bbbb-0001" ]
+cd "$testdir" || exit 1
+
+echo "SELECTION_TOOL as a fallback of CS_SELECTION_TOOL"
+reset_result
+export PICK=1
+# shellcheck disable=SC1090,SC2034
+(unset CS_SELECTION_TOOL; SELECTION_TOOL=fzf; source "$cs_file"; cs)
+check "fzf is used" [ -e "$testdir/fzf_args" ]
 check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume bbbb-0001" ]
 cd "$testdir" || exit 1
 
@@ -254,7 +263,7 @@ check "claude is not called" [ ! -e "$testdir/claude_args" ]
 
 echo "Shell select fallback"
 reset_result
-SELECTION_TOOL=no-such-tool cs <<< "3" > /dev/null 2>&1
+CS_SELECTION_TOOL=no-such-tool cs <<< "3" > /dev/null 2>&1
 check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume aaaa-0001" ]
 cd "$testdir" || exit 1
 
@@ -272,7 +281,7 @@ fi
 reset_result
 export PICK=2
 # shellcheck disable=SC1090
-(set -u; source "$cs_file" && SELECTION_TOOL=fzf cs) > "$testdir/nounset.out" 2>&1
+(set -u; source "$cs_file" && CS_SELECTION_TOOL=fzf cs) > "$testdir/nounset.out" 2>&1
 rc=$?
 check "a tool without options works with set -u" [ "$rc" -eq 0 ]
 check "the selected line is resumed" [ "$(cat "$testdir/claude_args" 2>/dev/null)" = "--resume dddd-0001" ]

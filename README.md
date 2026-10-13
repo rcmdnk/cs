@@ -124,10 +124,11 @@ The following tools are searched in this order and the first one found is used:
 - [jhawthorn/fzy](https://github.com/jhawthorn/fzy)
 - [junegunn/fzf](https://github.com/junegunn/fzf)
 
-You can set the tools with `SELECTION_TOOL` (comma separated) before sourcing `cs`:
+You can set the tools with `CS_SELECTION_TOOL` (comma separated) before sourcing `cs`
+(`SELECTION_TOOL` is used when `CS_SELECTION_TOOL` is not set):
 
 ```bash
-SELECTION_TOOL=fzf,peco
+CS_SELECTION_TOOL=fzf,peco
 ```
 
 If none of the tools is available, the `select` builtin of the shell is used.
@@ -138,7 +139,7 @@ Set them before sourcing `cs` in `.bashrc` or `.zshrc`:
 
 ```bash
 # Selection tool
-SELECTION_TOOL=${SELECTION_TOOL:-sentaku,peco,fzy,fzf}
+CS_SELECTION_TOOL=${CS_SELECTION_TOOL:-sentaku,peco,fzy,fzf}
 
 # Number of sessions to list
 CS_MAX_SESSIONS=${CS_MAX_SESSIONS:-20}
