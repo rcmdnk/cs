@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+## Description {{{
+#
+# cs: claude with session selection
+#
+# Homepage: https://github.com/rcmdnk/cs
+#
+_CS_NAME="cs"
+_CS_VERSION="v0.1.0"
+_CS_DATE="13/Oct/2026"
+# }}}
+
+# This file is meant to be sourced from bash or zsh, e.g. in .bashrc/.zshrc:
+#   source /path/to/cs
+# then run:
+#   cs
+#
+# Variables (set before sourcing to override):
+#   SELECTION_TOOL        comma separated selectors to try (default: sentaku,peco,fzy,fzf)
+#   CS_MAX_SESSIONS       number of sessions to list
+#   CS_CWD_MAX_LENGTH     cut directory names longer than this
+#   CS_MESSAGE_MAX_LENGTH cut the first message longer than this
+#   CS_ENTRYPOINT         list only sessions whose records have this entrypoint
+#                         (cli: started from the terminal; sdk-py etc. are subagent runs)
+
+# This file must be sourced, not executed {{{
+if [ -n "${ZSH_VERSION:-}" ];then
+  case $ZSH_EVAL_CONTEXT in
+    *:file*) ;;
+    *) echo "cs must be sourced: source $0" >&2; exit 1;;
+  esac
+elif [ "${BASH_SOURCE[0]}" = "$0" ];then
+  echo "cs must be sourced: source $0" >&2
+  exit 1
+fi # }}}
+
+_cs_select () { # Select from list {{{
+  local input=("$@")
+  local tool=""
+  local -a opts
+  local t
+  local -a values
+  local line value
+  opts=()
+  for t in $(echo "${SELECTION_TOOL:-sentaku,peco,fzy,fzf}"|tr , ' ');do
+    if type "$t" >& /dev/null ;then
+      tool=$t
+      break
+    fi
+  done
+  if [[ "$tool" = "sentaku" ]];then
+    opts=(-s line)
+  fi
+  if [ -n "$tool" ];then
+    # ${opts[@]+...}: an empty array is an error with set -u in bash < 4.4
+    printf '%s\n' "${input[*]}"|"$tool" ${opts[@]+"${opts[@]}"}
+  else
+    values=()
+    while IFS=$'\n' read -r line; do values+=("$line"); done < <(printf '%s\n' "${input[*]}")
+    select value in "${values[@]}";do
+      printf '%s\n' "$value"
+      break
+    done
+  fi
+} # }}}
+
+_cs_json_str () { # Read a JSON string from stdin (text right after the opening quote) {{{
+  # Print it up to the closing quote with escapes resolved; \n, \t etc. become spaces.
+  # With max > 0, stop after max*4 bytes (enough for max characters in UTF-8)
+  # at a character boundary. LC_ALL=C makes awk work on bytes in every awk.
+  LC_ALL=C awk -v max="${1:-0}" '{
+    out = ""
+    n = length($0)
+    for (i = 1; i <= n; i++) {
+      c = substr($0, i, 1)
+      if (c == "\"") break
+      if (c == "\\") {
+        i++
+        c = substr($0, i, 1)
+        if (c == "n" || c == "t" || c == "r" || c == "b" || c == "f") c = " "
+        else if (c == "u") c = "\\u"
+      }
+      out = out c
+      if (max > 0 && length(out) >= max * 4) {
+        nx = substr($0, i + 1, 1)
+        if (nx < "\200" || nx >= "\300") break
+      }
+    }
+    print out
+    exit
+  }'
+} # }}}
+
+_cs_json_value () { # Print the string value of the first "key":"..." in line {{{
+  # usage: _cs_json_value <line> <key> [max]
+  local key="\"$2\":\""
+  local rest="${1#*"$key"}"
+  if [ "$rest" = "$1" ];then
+    return
+  fi
+  printf '%s\n' "$rest" | _cs_json_str "${3:-0}"
+} # }}}
+
+_cs_first_message () { # Print the first text of message.content in a user record line {{{
+  local c="${1#*\"content\":}"
+  case $c in
+    \"*) printf '%s\n' "${c#\"}" | _cs_json_str "$CS_MESSAGE_MAX_LENGTH";;
+    \[*) _cs_json_value "$c" text "$CS_MESSAGE_MAX_LENGTH";;
+  esac
+} # }}}
+
+CS_MAX_SESSIONS=${CS_MAX_SESSIONS:-20}
+CS_CWD_MAX_LENGTH=${CS_CWD_MAX_LENGTH:-20}
+CS_MESSAGE_MAX_LENGTH=${CS_MESSAGE_MAX_LENGTH:-30}
+CS_ENTRYPOINT=${CS_ENTRYPOINT:-cli} # list only sessions started from the terminal (sdk-py etc. are subagent runs)
+cs () { # {{{ claude with session selection
+  local sessions ids dirs n list ts f d cwd dir first id selected
+  case "${1:-}" in
+    -v|--version)
+      printf '%s %s %s\n' "$_CS_NAME" "$_CS_VERSION" "$_CS_DATE"
+      return 0;;
+    -h|--help)
+      cat <<EOF
+Usage: cs [-h] [-v]
+
+Select a Claude Code session from the recent ones,
+move to its directory and run claude --resume.
+
+  -h, --help     Show this help
+  -v, --version  Show version
+
+Variables (set before sourcing cs):
+  SELECTION_TOOL         Selection tools to try, comma separated (default: sentaku,peco,fzy,fzf)
+  CS_MAX_SESSIONS        Number of sessions to list (default: 20)
+  CS_CWD_MAX_LENGTH      Directory names longer than this are shortened (default: 20)
+  CS_MESSAGE_MAX_LENGTH  The first message is cut to this length (default: 30)
+  CS_ENTRYPOINT          Only sessions with this entrypoint are listed (default: cli)
+EOF
+      return 0;;
+    "") ;;
+    *)
+      echo "cs: unknown option: $1" >&2
+      return 1;;
+  esac
+  local -a stat_fmt
+  local gnu_date
+  # find -printf is GNU only: get mtime with stat (GNU: -c, BSD: -f)
+  if [[ $(stat --version 2>/dev/null) == *GNU* ]];then
+    stat_fmt=(-c '%Y %n')
+  else
+    stat_fmt=(-f '%m %N')
+  fi
+  gnu_date=0
+  [[ $(date --version 2>/dev/null) == *GNU* ]] && gnu_date=1
+  sessions=$(find ~/.claude/projects/ -maxdepth 2 -name '*.jsonl' \
+    -exec grep -q -- "\"entrypoint\":\"${CS_ENTRYPOINT}\"" {} \; \
+    -exec stat "${stat_fmt[@]}" {} + \
+    | sort -rn | head -n "${CS_MAX_SESSIONS}")
+  if [ -z "$sessions" ];then
+    echo "No claude session found (CS_ENTRYPOINT=${CS_ENTRYPOINT})" >&2
+    return 1
+  fi
+  ids=()
+  dirs=()
+  n=0
+  list=""
+  while read -r ts f; do
+    if [ "$gnu_date" = 1 ];then
+      d=$(date -d @"${ts%.*}" '+%m-%d %H:%M')
+    else
+      d=$(date -r "${ts%.*}" '+%m-%d %H:%M')
+    fi
+    cwd=$(_cs_json_value "$(grep -m1 '"cwd"' "$f")" cwd)
+    dir=$cwd
+    if [ ${#cwd} -gt "${CS_CWD_MAX_LENGTH}" ]; then
+      cwd="...${cwd: -17}"
+    fi
+    first=$(_cs_first_message "$(grep -m1 '"type":"user"' "$f")")
+    # Cut by characters, not bytes (GNU cut -c counts bytes)
+    first=${first:0:${CS_MESSAGE_MAX_LENGTH}}
+    id=$(_cs_json_value "$(grep -m1 '"sessionId"' "$f")" sessionId)
+    ids+=("$id")
+    dirs+=("$dir")
+    # Keep backslashes in values literal: no echo -e here (zsh echo interprets them too)
+    list="$list$d"$'\t'"$cwd"$'\t'"$first"$'\n'
+    n=$((n + 1))
+  done <<< "$sessions"
+  list=$(printf '%s' "$list" | column -t -s $'\t')
+  selected=$(_cs_select "$list")
+  if [ -z "$selected" ]; then
+    return
+  fi
+  n=$(printf '%s\n' "$list" | grep -nxF -- "$selected" | head -n 1 | cut -d: -f1)
+  if [ -z "$n" ]; then
+    echo "Selected line is not in the list: $selected" >&2
+    return 1
+  fi
+  if [ -z "${ZSH_VERSION:-}" ] || setopt | grep -q ksharrays;then
+    n=$((n - 1))
+  fi
+  cd "${dirs[n]}" || return $?
+  eval "${PROMPT_COMMAND:-}"
+  claude --resume "${ids[n]}"
+} # }}}
