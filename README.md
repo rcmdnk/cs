@@ -25,6 +25,36 @@ with both GNU and BSD versions supported.
 
 ## Installation
 
+### Homebrew
+
+```
+$ brew install rcmdnk/rcmdnkpac/cs
+```
+
+or tap [rcmdnk/rcmdnkpac](https://github.com/rcmdnk/homebrew-rcmdnkpac) first:
+
+```
+$ brew tap rcmdnk/rcmdnkpac
+$ brew install cs
+```
+
+Recent Homebrew loads formulae from a third-party tap only after you trust it.
+If `brew` refuses to load the formula, run:
+
+```
+$ brew trust rcmdnk/rcmdnkpac
+```
+
+With [brew-file](https://github.com/rcmdnk/homebrew-file), add to your Brewfile:
+
+```
+tap 'rcmdnk/rcmdnkpac'
+brew 'cs'
+```
+
+This installs `cs` to `$(brew --prefix)/etc/cs`
+(for example `/opt/homebrew/etc/cs`) and [sentaku](https://github.com/rcmdnk/sentaku) as the selection tool.
+
 ### Download
 
 Get `etc/cs` and put it where you like:
@@ -45,6 +75,12 @@ Source it in your `.bashrc` or `.zshrc`:
 
 ```bash
 source /path/to/cs
+```
+
+With Homebrew:
+
+```bash
+source "$(brew --prefix)/etc/cs"
 ```
 
 `cs` must be sourced, not executed, because it changes the directory of the current shell.
