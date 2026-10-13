@@ -6,7 +6,7 @@
 # Homepage: https://github.com/rcmdnk/cs
 #
 _CS_NAME="cs"
-_CS_VERSION="v0.1.0"
+_CS_VERSION="v0.1.1"
 _CS_DATE="13/Oct/2026"
 # }}}
 
@@ -64,49 +64,85 @@ _cs_select () { # Select from list {{{
   fi
 } # }}}
 
-_cs_json_str () { # Read a JSON string from stdin (text right after the opening quote) {{{
-  # Print it up to the closing quote with escapes resolved; \n, \t etc. become spaces.
+_cs_sessions () { # Read "mtime path" lines (newest first) from stdin and print the sessions {{{
+  # Each file is read until "entrypoint":"$CS_ENTRYPOINT", cwd, sessionId and
+  # the first user message are found; stops after CS_MAX_SESSIONS sessions.
+  # Output: mtime, cwd, first message and sessionId separated by \037.
+  # LC_ALL=C makes awk work on bytes in every awk.
+  LC_ALL=C awk -v ep="$CS_ENTRYPOINT" -v nmax="$CS_MAX_SESSIONS" \
+    -v msgmax="$CS_MESSAGE_MAX_LENGTH" '
+  # The JSON string at s (text right after the opening quote) up to the
+  # closing quote with escapes resolved; \n, \t etc. become spaces.
   # With max > 0, stop after max*4 bytes (enough for max characters in UTF-8)
-  # at a character boundary. LC_ALL=C makes awk work on bytes in every awk.
-  LC_ALL=C awk -v max="${1:-0}" '{
+  # at a character boundary.
+  function json_str(s, max,   out, n, i, c, nx) {
     out = ""
-    n = length($0)
+    n = length(s)
     for (i = 1; i <= n; i++) {
-      c = substr($0, i, 1)
+      c = substr(s, i, 1)
       if (c == "\"") break
       if (c == "\\") {
         i++
-        c = substr($0, i, 1)
+        c = substr(s, i, 1)
         if (c == "n" || c == "t" || c == "r" || c == "b" || c == "f") c = " "
         else if (c == "u") c = "\\u"
       }
       out = out c
       if (max > 0 && length(out) >= max * 4) {
-        nx = substr($0, i + 1, 1)
+        nx = substr(s, i + 1, 1)
         if (nx < "\200" || nx >= "\300") break
       }
     }
-    print out
-    exit
+    return out
+  }
+  # The string value of the first "key":"..." in line ("" if there is none)
+  function json_value(line, key, max,   k, p) {
+    k = "\"" key "\":\""
+    p = index(line, k)
+    if (p == 0) return ""
+    return json_str(substr(line, p + length(k)), max)
+  }
+  # The first text of message.content in a user record line
+  function first_message(line,   p, c) {
+    p = index(line, "\"content\":")
+    if (p == 0) return ""
+    c = substr(line, p + 10)
+    if (substr(c, 1, 1) == "\"") return json_str(substr(c, 2), msgmax)
+    if (substr(c, 1, 1) == "[") return json_value(c, "text", msgmax)
+    return ""
+  }
+  BEGIN {
+    if (nmax <= 0) exit
+    epkey = "\"entrypoint\":\"" ep "\""
+  }
+  {
+    sp = index($0, " ")
+    ts = substr($0, 1, sp - 1)
+    f = substr($0, sp + 1)
+    ok = 0
+    got_cwd = 0; got_id = 0; got_first = 0
+    cwd = ""; id = ""; first = ""
+    while ((getline line < f) > 0) {
+      if (!got_cwd && index(line, "\"cwd\"")) {
+        cwd = json_value(line, "cwd", 0)
+        got_cwd = 1
+      }
+      if (!got_id && index(line, "\"sessionId\"")) {
+        id = json_value(line, "sessionId", 0)
+        got_id = 1
+      }
+      if (!got_first && index(line, "\"type\":\"user\"")) {
+        first = first_message(line)
+        got_first = 1
+      }
+      if (!ok && index(line, epkey)) ok = 1
+      if (ok && got_cwd && got_id && got_first) break
+    }
+    close(f)
+    if (!ok) next
+    printf "%s\037%s\037%s\037%s\n", ts, cwd, first, id
+    if (++n >= nmax) exit
   }'
-} # }}}
-
-_cs_json_value () { # Print the string value of the first "key":"..." in line {{{
-  # usage: _cs_json_value <line> <key> [max]
-  local key="\"$2\":\""
-  local rest="${1#*"$key"}"
-  if [ "$rest" = "$1" ];then
-    return
-  fi
-  printf '%s\n' "$rest" | _cs_json_str "${3:-0}"
-} # }}}
-
-_cs_first_message () { # Print the first text of message.content in a user record line {{{
-  local c="${1#*\"content\":}"
-  case $c in
-    \"*) printf '%s\n' "${c#\"}" | _cs_json_str "$CS_MESSAGE_MAX_LENGTH";;
-    \[*) _cs_json_value "$c" text "$CS_MESSAGE_MAX_LENGTH";;
-  esac
 } # }}}
 
 CS_MAX_SESSIONS=${CS_MAX_SESSIONS:-20}
@@ -114,7 +150,7 @@ CS_CWD_MAX_LENGTH=${CS_CWD_MAX_LENGTH:-20}
 CS_MESSAGE_MAX_LENGTH=${CS_MESSAGE_MAX_LENGTH:-30}
 CS_ENTRYPOINT=${CS_ENTRYPOINT:-cli} # list only sessions started from the terminal (sdk-py etc. are subagent runs)
 cs () { # {{{ claude with session selection
-  local sessions ids dirs n list ts f d cwd dir first id selected
+  local sessions ids dirs n list ts d cwd dir first id selected date_cmd
   case "${1:-}" in
     -v|--version)
       printf '%s %s %s\n' "$_CS_NAME" "$_CS_VERSION" "$_CS_DATE"
@@ -142,20 +178,39 @@ EOF
       echo "cs: unknown option: $1" >&2
       return 1;;
   esac
+  case $CS_MAX_SESSIONS in
+    ''|*[!0-9]*)
+      echo "cs: CS_MAX_SESSIONS must be a number: $CS_MAX_SESSIONS" >&2
+      return 1;;
+  esac
   local -a stat_fmt
-  local gnu_date
   # find -printf is GNU only: get mtime with stat (GNU: -c, BSD: -f)
   if [[ $(stat --version 2>/dev/null) == *GNU* ]];then
     stat_fmt=(-c '%Y %n')
   else
     stat_fmt=(-f '%m %N')
   fi
-  gnu_date=0
-  [[ $(date --version 2>/dev/null) == *GNU* ]] && gnu_date=1
+  if [ -n "${ZSH_VERSION:-}" ];then
+    if zmodload zsh/datetime 2>/dev/null;then
+      date_cmd=strftime
+    else
+      date_cmd=date
+    fi
+  elif [ "${BASH_VERSINFO[0]}" -gt 4 ] \
+    || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 2 ]; };then
+    date_cmd=printf
+  else
+    date_cmd=date
+  fi
+  if [ "$date_cmd" = date ];then
+    if [[ $(date --version 2>/dev/null) == *GNU* ]];then
+      date_cmd=gnu_date
+    else
+      date_cmd=bsd_date
+    fi
+  fi
   sessions=$(find ~/.claude/projects/ -maxdepth 2 -name '*.jsonl' \
-    -exec grep -q -- "\"entrypoint\":\"${CS_ENTRYPOINT}\"" {} \; \
-    -exec stat "${stat_fmt[@]}" {} + \
-    | sort -rn | head -n "${CS_MAX_SESSIONS}")
+    -exec stat "${stat_fmt[@]}" {} + | sort -rn | _cs_sessions)
   if [ -z "$sessions" ];then
     echo "No claude session found (CS_ENTRYPOINT=${CS_ENTRYPOINT})" >&2
     return 1
@@ -164,21 +219,20 @@ EOF
   dirs=()
   n=0
   list=""
-  while read -r ts f; do
-    if [ "$gnu_date" = 1 ];then
-      d=$(date -d @"${ts%.*}" '+%m-%d %H:%M')
-    else
-      d=$(date -r "${ts%.*}" '+%m-%d %H:%M')
-    fi
-    cwd=$(_cs_json_value "$(grep -m1 '"cwd"' "$f")" cwd)
+  while IFS=$'\037' read -r ts cwd first id; do
+    ts=${ts%.*}
+    case $date_cmd in
+      strftime) strftime -s d '%m-%d %H:%M' "$ts";;
+      printf) printf -v d '%(%m-%d %H:%M)T' "$ts";;
+      gnu_date) d=$(date -d @"$ts" '+%m-%d %H:%M');;
+      *) d=$(date -r "$ts" '+%m-%d %H:%M');;
+    esac
     dir=$cwd
     if [ ${#cwd} -gt "${CS_CWD_MAX_LENGTH}" ]; then
       cwd="...${cwd: -17}"
     fi
-    first=$(_cs_first_message "$(grep -m1 '"type":"user"' "$f")")
     # Cut by characters, not bytes (GNU cut -c counts bytes)
     first=${first:0:${CS_MESSAGE_MAX_LENGTH}}
-    id=$(_cs_json_value "$(grep -m1 '"sessionId"' "$f")" sessionId)
     ids+=("$id")
     dirs+=("$dir")
     # Keep backslashes in values literal: no echo -e here (zsh echo interprets them too)

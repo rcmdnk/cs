@@ -24,7 +24,7 @@ trap 'rm -rf "$testdir"' EXIT
 export CS_TEST_DIR=$testdir
 export HOME=$testdir
 export PATH="$testdir/bin:$PATH"
-mkdir -p "$testdir/bin" "$HOME/work/a" "$HOME/work/b" "$HOME/work/c" "$HOME/work/d" "$HOME/work/e"
+mkdir -p "$testdir/bin" "$HOME/work/a" "$HOME/work/b" "$HOME/work/c" "$HOME/work/d" "$HOME/work/e" "$HOME/work/f" "$HOME/work/g h" "$HOME/work/h"
 cat > "$testdir/bin/claude" <<'FAKE'
 #!/bin/sh
 pwd -P > "$CS_TEST_DIR/claude_pwd"
@@ -59,6 +59,20 @@ make_session -work-b bbbb-0001 "$HOME/work/b" cli '"first message b1\nsecond lin
 make_session -work-c cccc-0001 "$HOME/work/c" sdk-py '"sdk run c1"' 202601010300
 make_session -work-a aaaa-0002 "$HOME/work/a" cli '[{"type":"text","text":"first message a2"}]' 202601010030
 make_session -work-d dddd-0001 "$HOME/work/d" cli '"literal \\n and \\t in d1"' 202601010130
+make_record () { # file type cwd id entrypoint content
+  printf '{"type":"%s","cwd":"%s","sessionId":"%s","entrypoint":"%s","message":{"role":"%s","content":%s}}\n' \
+    "$2" "$3" "$4" "$5" "$2" "$6" >> "$1"
+}
+mkdir -p "$HOME/.claude/projects/-work-f"
+make_record "$HOME/.claude/projects/-work-f/ffff-0001.jsonl" user "$HOME/work/f" ffff-0001 sdk-py '"started by sdk f1"'
+make_record "$HOME/.claude/projects/-work-f/ffff-0001.jsonl" assistant "$HOME/work/f" ffff-0001 sdk-py '[{"type":"text","text":"ok"}]'
+make_record "$HOME/.claude/projects/-work-f/ffff-0001.jsonl" user "$HOME/work/f" ffff-0001 cli '"resumed f1"'
+touch -t 202601010001 "$HOME/.claude/projects/-work-f/ffff-0001.jsonl"
+make_session "-work-g h" gggg-0001 "$HOME/work/g h" cli '"space dir g1"' 202512312358
+mkdir -p "$HOME/.claude/projects/-work-h"
+printf '{"type":"queue-operation","sessionId":"hhhh-0001"}\n{"type":"system","cwd":"%s","sessionId":"hhhh-0001","entrypoint":"cli"}\n' \
+  "$HOME/work/h" > "$HOME/.claude/projects/-work-h/hhhh-0001.jsonl"
+touch -t 202512312359 "$HOME/.claude/projects/-work-h/hhhh-0001.jsonl"
 # }}}
 
 line_matches () { # line_number pattern
@@ -100,16 +114,43 @@ reset_result
 export PICK=2
 cs
 check "sentaku is called with -s line" [ "$(cat "$testdir/sentaku_args")" = "-s line" ]
-check "4 sessions are listed (sdk-py session is excluded)" [ "$(wc -l < "$testdir/list" | tr -d ' ')" -eq 4 ]
+check "7 sessions are listed (sdk-py session is excluded)" [ "$(wc -l < "$testdir/list" | tr -d ' ')" -eq 7 ]
 check "sdk-py session is not listed" not_in_list "sdk run"
 check "line 1 is the newest session with its mtime" line_matches 1 '^01-01 02:00 .*work/b .*first message b1 second line'
 check "line 2 keeps literal backslashes in one row" line_matches 2 '^01-01 01:30 .*work/d .*literal \\n and \\t in d1 *$'
 check "line 3 is the next session" line_matches 3 '^01-01 01:00 .*work/a .*first message a1'
 check "line 4 is the oldest session (array content)" line_matches 4 '^01-01 00:30 .*work/a .*first message a2'
+check "line 5 is the session resumed from the terminal, with its first message" line_matches 5 '^01-01 00:01 .*work/f .*started by sdk f1'
+check "line 6 is a session without a user record (empty message)" line_matches 6 '^12-31 23:59 .*work/h *$'
+check "line 7 is a session in a directory with a space" line_matches 7 '^12-31 23:58 .*work/g h *space dir g1'
 check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume dddd-0001" ]
 check "claude runs in the session directory" [ "$(cat "$testdir/claude_pwd")" = "$(abs "$HOME/work/d")" ]
 check "the current shell moves to the session directory" [ "$(pwd -P)" = "$(abs "$HOME/work/d")" ]
 cd "$testdir" || exit 1
+
+echo "Select a session without a user record"
+reset_result
+export PICK=6
+cs
+check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume hhhh-0001" ]
+check "claude runs in the session directory" [ "$(cat "$testdir/claude_pwd")" = "$(abs "$HOME/work/h")" ]
+cd "$testdir" || exit 1
+
+echo "Select a session in a directory with a space"
+reset_result
+export PICK=7
+cs
+check "the selected line is resumed" [ "$(cat "$testdir/claude_args")" = "--resume gggg-0001" ]
+check "claude runs in the session directory" [ "$(cat "$testdir/claude_pwd")" = "$(abs "$HOME/work/g h")" ]
+cd "$testdir" || exit 1
+
+echo "Invalid CS_MAX_SESSIONS"
+reset_result
+CS_MAX_SESSIONS=abc cs 2> "$testdir/err"
+rc=$?
+check "returns 1" [ "$rc" -eq 1 ]
+check "prints a message" grep -q "CS_MAX_SESSIONS must be a number" "$testdir/err"
+check "claude is not called" [ ! -e "$testdir/claude_args" ]
 
 echo "Options"
 reset_result
